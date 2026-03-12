@@ -1,22 +1,21 @@
 # =============================================================================
 # 03_clustering.py
-# Customer Segmentation via K-means Clustering
+# K-Means 알고리즘을 활용한 고객 군집화
 #
-# [Purpose]
-# Before predicting churn, we first segment customers into behavioral groups.
-# This reflects the actual workflow of Samsung Fire's digital service planning:
-#   "Understand WHO our customers are → then decide WHAT service to offer them"
+# [분석 목적 및 구성 이유]
+# 이탈을 예측하기에 앞서, 전체 고객을 행동 패턴에 따라 몇 개의 의미 있는 그룹으로 묶는다.
+# 이는 "고객이 누구인지 파악한 후, 그에 맞는 서비스를 기획한다"는 실제 디지털 서비스 기획의
+# 업무 흐름을 그대로 반영하기 위함이다.
 #
-# Insurance domain mapping:
-#   Cluster 1 (e.g. New + High Premium)  → Early churn risk segment
-#   Cluster 2 (e.g. Long + Low Premium)  → Loyal stable segment
-#   Cluster 3 (e.g. Mid + Digital user)  → Growth potential segment
+# [보험 도메인 해석 예시]
+#   - 고위험 군집: 가입 기간이 짧고 월 보험료가 높은 고객 -> 온보딩 및 초기 케어 대상
+#   - 저위험 군집: 장기 유지 중이며 납입액이 안정적인 고객 -> 우수 고객 혜택 제공 대상
 #
-# [Method]
-#   - Features: tenure, MonthlyCharges, TotalCharges + encoded categoricals
-#   - Optimal K: Elbow method (inertia) + Silhouette score
-#   - Algorithm: K-means (sklearn)
-#   - Visualization: 2D scatter (PCA), cluster profile bar charts
+# [분석 방법]
+#   - 활용 변수: 계약 유지 기간, 월 납입액, 누적 납입액 및 주요 범주형 변수
+#   - 최적 군집 수(K) 도출: 엘보우 방법 및 실루엣 점수 교차 검증
+#   - 알고리즘: K-Means (거리 기반 군집화)
+#   - 시각화: 주성분 분석(PCA)을 통한 2차원 산점도 및 군집별 프로파일 막대그래프
 # =============================================================================
 
 import os
@@ -51,38 +50,31 @@ from load_data_utils import load_data
 
 
 # =============================================================================
-# STEP 1. Feature Engineering for Clustering
+# STEP 1. 군집화를 위한 파생 변수 생성 및 전처리
 # =============================================================================
 
 def prepare_features(df: pd.DataFrame):
     """
-    Select and encode features for K-means clustering.
+    K-Means 군집화에 사용할 핵심 변수를 선택하고 알맞은 형태로 인코딩한다.
 
-    Feature selection rationale:
-    - tenure, MonthlyCharges, TotalCharges: core behavioral signals
-      (insurance: contract duration, premium level, total paid)
-    - Contract: payment frequency (monthly vs annual) — strong churn predictor
-    - InternetService: digital channel usage proxy
-    - PaperlessBilling: digital engagement indicator
-
-    Encoding:
-    - Binary Yes/No → 1/0
-    - Multi-class (Contract, InternetService) → one-hot encoding
-    - All features standardized (mean=0, std=1) for K-means distance calculation
-      K-means is distance-based, so scale matters — StandardScaler is essential
+    [구성 이유]
+    K-Means 알고리즘은 데이터 포인트 간의 '유클리드 거리'를 기반으로 작동한다.
+    따라서 월 납입액(수십 단위)과 누적 납입액(수천 단위)처럼 스케일이 다른 변수들을
+    그대로 사용하면 결과가 왜곡되므로, 평균이 0이고 표준편차가 1이 되도록
+    표준화(StandardScaler)를 반드시 수행해야 한다. 범주형 변수는 원핫 인코딩을 적용한다.
     """
     df = df.copy()
 
-    # Binary Yes/No encoding
+    # 이진 범주형 변수 인코딩 (Yes=1, No=0)
     binary_cols = ['PaperlessBilling', 'PhoneService', 'Partner', 'Dependents']
     for col in binary_cols:
         df[col + '_enc'] = (df[col] == 'Yes').astype(int)
 
-    # Multi-class one-hot encoding
+    # 다중 범주형 변수 원핫 인코딩
     contract_dummies = pd.get_dummies(df['Contract'], prefix='Contract')
     internet_dummies = pd.get_dummies(df['InternetService'], prefix='Internet')
 
-    # Final feature set
+    # 군집화에 활용할 최종 독립 변수 목록
     feature_cols = ['tenure', 'MonthlyCharges', 'TotalCharges',
                     'SeniorCitizen',
                     'PaperlessBilling_enc', 'PhoneService_enc',
@@ -90,7 +82,7 @@ def prepare_features(df: pd.DataFrame):
 
     X = pd.concat([df[feature_cols], contract_dummies, internet_dummies], axis=1)
 
-    # Standardize: K-means uses Euclidean distance, so all features must be on same scale
+    # 거리 기반 알고리즘을 위한 데이터 표준화
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X)
 
@@ -98,25 +90,18 @@ def prepare_features(df: pd.DataFrame):
 
 
 # =============================================================================
-# STEP 2. Find Optimal K — Elbow + Silhouette
+# STEP 2. 최적의 군집 수(K) 탐색
 # =============================================================================
 
 def find_optimal_k(X_scaled: np.ndarray, k_range=range(2, 9)):
     """
-    Determine the optimal number of clusters using two complementary methods:
+    엘보우 방법과 실루엣 점수를 결합하여 객관적인 최적의 군집 수(K)를 찾는다.
 
-    1. Elbow Method (Inertia):
-       - Inertia = sum of squared distances from each point to its cluster center
-       - Plot inertia vs K → look for the 'elbow' where improvement slows
-       - Limitation: subjective, always decreases as K increases
-
-    2. Silhouette Score:
-       - Measures how similar a point is to its own cluster vs other clusters
-       - Range: [-1, 1], higher is better
-       - More objective than elbow method
-       - Best K = highest silhouette score
-
-    Using both methods together gives a more reliable choice.
+    [구성 이유]
+    엘보우 방법은 군집 수가 늘어날수록 관성(Inertia)이 무조건 감소하므로 최적점을
+    주관적으로 판단해야 하는 한계가 있다. 이를 보완하기 위해, 군집 내 응집도와 
+    군집 간 분리도를 동시에 평가하는 실루엣 점수(Silhouette Score)를 함께 산출하여 
+    가장 높은 점수를 기록하는 K값을 최종 군집 수로 선정한다.
     """
     inertias    = []
     silhouettes = []
@@ -126,12 +111,11 @@ def find_optimal_k(X_scaled: np.ndarray, k_range=range(2, 9)):
         labels = km.fit_predict(X_scaled)
         inertias.append(km.inertia_)
         silhouettes.append(silhouette_score(X_scaled, labels))
-        print(f"  K={k}: Inertia={km.inertia_:.1f}, Silhouette={silhouette_score(X_scaled, labels):.4f}")
+        print(f"  K={k}: 관성(Inertia)={km.inertia_:.1f}, 실루엣 점수={silhouette_score(X_scaled, labels):.4f}")
 
-    # Plot elbow + silhouette side by side
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
 
-    # Elbow
+    # 엘보우 방법 시각화
     ax1.plot(list(k_range), inertias, 'bo-', linewidth=2, markersize=7)
     ax1.set_xlabel('Number of Clusters (K)')
     ax1.set_ylabel('Inertia (Within-cluster Sum of Squares)')
@@ -139,7 +123,7 @@ def find_optimal_k(X_scaled: np.ndarray, k_range=range(2, 9)):
     ax1.spines['top'].set_visible(False)
     ax1.spines['right'].set_visible(False)
 
-    # Silhouette
+    # 실루엣 점수 시각화
     best_k = list(k_range)[np.argmax(silhouettes)]
     ax2.plot(list(k_range), silhouettes, 'rs-', linewidth=2, markersize=7)
     ax2.axvline(best_k, color='red', linestyle='--', alpha=0.5,
@@ -156,55 +140,54 @@ def find_optimal_k(X_scaled: np.ndarray, k_range=range(2, 9)):
     path = os.path.join(FIGURES_DIR, '06_optimal_k.png')
     plt.savefig(path, bbox_inches='tight')
     plt.close()
-    print(f"\n  Saved: {path}")
-    print(f"  Best K by Silhouette: {best_k}")
+    print(f"\n  저장 완료: {path}")
+    print(f"  실루엣 점수 기준 최적의 K: {best_k}")
 
     return best_k, inertias, silhouettes
 
 
 # =============================================================================
-# STEP 3. Fit Final K-means Model
+# STEP 3. K-Means 모델 최종 학습
 # =============================================================================
 
 def fit_kmeans(X_scaled: np.ndarray, k: int):
     """
-    Fit the final K-means model with the selected K.
+    선정된 최적의 K값을 바탕으로 최종 군집화 모델을 학습한다.
 
-    n_init=10: run K-means 10 times with different centroid seeds
-               and pick the best result — reduces sensitivity to initialization
-    random_state=42: reproducibility
+    [구성 이유]
+    초기 중심점 위치에 따라 결과가 달라지는 K-Means의 단점을 보완하기 위해,
+    n_init=10 옵션을 주어 10번 반복 실행한 후 가장 우수한 결과를 선택하도록 한다.
+    학습된 모델은 추후 새로운 데이터가 유입되었을 때 군집을 판별할 수 있도록 저장한다.
     """
     km = KMeans(n_clusters=k, random_state=42, n_init=10)
     labels = km.fit_predict(X_scaled)
 
-    # Save model for reuse in later steps
     model_path = os.path.join(MODELS_DIR, 'kmeans_model.pkl')
     joblib.dump(km, model_path)
-    print(f"  Model saved: {model_path}")
+    print(f"  모델 저장 완료: {model_path}")
 
     return km, labels
 
 
 # =============================================================================
-# STEP 4. Visualize Clusters (PCA 2D)
+# STEP 4. 군집화 결과 시각화 (PCA 2차원 축소)
 # =============================================================================
 
 def plot_clusters_pca(X_scaled: np.ndarray, labels: np.ndarray, k: int):
     """
-    Reduce high-dimensional features to 2D using PCA for visualization.
+    고차원의 데이터를 2차원으로 축소하여 군집의 분포를 시각적으로 확인한다.
 
-    PCA (Principal Component Analysis):
-    - Finds directions of maximum variance in the data
-    - Projects all features onto 2 principal components for 2D plotting
-    - Does NOT change the clustering — only used for visualization
-    - Explained variance ratio tells us how much information is preserved
+    [구성 이유]
+    14개의 변수로 이루어진 데이터를 한눈에 파악하기 위해 주성분 분석(PCA)을 활용한다.
+    이는 데이터를 2개의 축으로 압축하여 시각화할 뿐, 실제 군집화 결과 자체를
+    왜곡하거나 변경하지는 않는다. 분산 설명력을 통해 축소의 타당성을 함께 검증한다.
     """
     pca = PCA(n_components=2, random_state=42)
     X_pca = pca.fit_transform(X_scaled)
 
     explained = pca.explained_variance_ratio_
-    print(f"  PCA explained variance: PC1={explained[0]:.1%}, PC2={explained[1]:.1%}, "
-          f"Total={sum(explained):.1%}")
+    print(f"  PCA 분산 설명력: PC1={explained[0]:.1%}, PC2={explained[1]:.1%}, "
+          f"총합={sum(explained):.1%}")
 
     fig, ax = plt.subplots(figsize=(8, 6))
     colors = plt.cm.Set1(np.linspace(0, 0.8, k))
@@ -226,31 +209,26 @@ def plot_clusters_pca(X_scaled: np.ndarray, labels: np.ndarray, k: int):
     path = os.path.join(FIGURES_DIR, '07_clusters_pca.png')
     plt.savefig(path, bbox_inches='tight')
     plt.close()
-    print(f"  Saved: {path}")
+    print(f"  저장 완료: {path}")
 
 
 # =============================================================================
-# STEP 5. Cluster Profiling
+# STEP 5. 군집 특성 프로파일링
 # =============================================================================
 
 def profile_clusters(df: pd.DataFrame, labels: np.ndarray, k: int):
     """
-    Analyze the characteristics of each cluster to give them business meaning.
+    각 군집의 통계적 특성을 분석하여 비즈니스적 의미를 부여한다.
 
-    This is the most important step for service planning:
-    - Each cluster should map to a distinct customer persona
-    - Churn rate per cluster tells us which segments need intervention
-    - Key variables (tenure, charges, contract type) reveal the 'why'
-
-    Insurance domain:
-    - Cluster with high churn + short tenure = new customer at-risk segment
-    - Cluster with low churn + long tenure = loyal customer segment
-    - etc.
+    [구성 이유]
+    서비스 기획 관점에서 가장 중요한 단계이다. 단순히 '1번 군집', '2번 군집'으로 
+    나누는 것에 그치지 않고, 각 군집의 이탈률, 평균 계약 기간, 평균 보험료 등을 
+    산출하여 어떤 특성을 가진 고객들이 모여 있는지 정량적으로 확인한다.
     """
     df = df.copy()
-    df['Cluster'] = labels + 1  # 1-indexed for readability
+    df['Cluster'] = labels + 1 
 
-    # Numeric profile per cluster
+    # 군집별 주요 수치형 변수 요약
     numeric_profile = df.groupby('Cluster').agg(
         Count       =('Cluster', 'count'),
         Tenure_mean =('tenure', 'mean'),
@@ -262,22 +240,22 @@ def profile_clusters(df: pd.DataFrame, labels: np.ndarray, k: int):
     numeric_profile['Churn_rate'] = (numeric_profile['Churn_rate'] * 100).round(1)
     numeric_profile['Senior_pct'] = (numeric_profile['Senior_pct'] * 100).round(1)
 
-    print("\n[ Cluster Numeric Profile ]")
+    print("\n[ 군집별 주요 수치 특성 요약 ]")
     print(numeric_profile.to_string())
 
-    # Categorical profile: Contract type distribution per cluster
+    # 군집별 납입 주기 분포 확인
     contract_profile = (df.groupby(['Cluster', 'Contract'])
                           .size()
                           .unstack(fill_value=0))
     contract_pct = contract_profile.div(contract_profile.sum(axis=1), axis=0) * 100
-    print("\n[ Contract Type Distribution per Cluster (%) ]")
+    print("\n[ 군집별 납입 주기 분포 비율 (%) ]")
     print(contract_pct.round(1).to_string())
 
-    # Visualization: cluster profile radar-style bar chart
+    # 군집 특성 비교 시각화
     fig, axes = plt.subplots(1, 3, figsize=(15, 5))
     colors = plt.cm.Set1(np.linspace(0, 0.8, k))
 
-    # Churn rate per cluster
+    # 이탈률 비교
     ax = axes[0]
     bars = ax.bar(numeric_profile.index.astype(str),
                   numeric_profile['Churn_rate'],
@@ -294,7 +272,7 @@ def profile_clusters(df: pd.DataFrame, labels: np.ndarray, k: int):
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
 
-    # Avg tenure per cluster
+    # 평균 계약 기간 비교
     ax = axes[1]
     bars = ax.bar(numeric_profile.index.astype(str),
                   numeric_profile['Tenure_mean'],
@@ -308,7 +286,7 @@ def profile_clusters(df: pd.DataFrame, labels: np.ndarray, k: int):
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
 
-    # Avg monthly charges per cluster
+    # 평균 보험료 비교
     ax = axes[2]
     bars = ax.bar(numeric_profile.index.astype(str),
                   numeric_profile['Monthly_mean'],
@@ -328,24 +306,24 @@ def profile_clusters(df: pd.DataFrame, labels: np.ndarray, k: int):
     path = os.path.join(FIGURES_DIR, '08_cluster_profiles.png')
     plt.savefig(path, bbox_inches='tight')
     plt.close()
-    print(f"\n  Saved: {path}")
+    print(f"\n  저장 완료: {path}")
 
     return df, numeric_profile
 
 
 # =============================================================================
-# STEP 6. Assign Cluster Labels (Business Personas)
+# STEP 6. 비즈니스 페르소나 및 액션 플랜 부여
 # =============================================================================
 
 def assign_personas(numeric_profile: pd.DataFrame):
     """
-    Assign human-readable business personas to each cluster
-    based on churn rate and tenure pattern.
-
-    This step translates statistical clusters into actionable segments
-    for the service planning team — the core output of this analysis.
+    통계적으로 분류된 군집에 비즈니스 페르소나를 부여하고 맞춤형 기획안을 도출한다.
+    
+    [구성 이유]
+    데이터 분석 결과를 현업 부서(서비스 기획팀, 마케팅팀 등)에서 즉시 활용할 수 있는
+    실행 가능한 언어(Actionable Insight)로 번역하는 핵심 과정이다.
     """
-    print("\n[ Cluster Personas — Insurance Service Planning ]")
+    print("\n[ 군집별 고객 페르소나 및 서비스 기획 방안 ]")
     print("=" * 60)
 
     for cluster_id, row in numeric_profile.iterrows():
@@ -354,68 +332,61 @@ def assign_personas(numeric_profile: pd.DataFrame):
         charge = row['Monthly_mean']
         count  = int(row['Count'])
 
-        # Assign persona based on behavioral pattern
         if churn > 40:
-            persona = "HIGH RISK — At-risk New Customers"
-            action  = "Priority: Onboarding service, early engagement push notification"
+            persona = "고위험군 (High Risk) — 이탈 가능성이 매우 높은 초기 고객"
+            action  = "최우선 과제: 앱 온보딩 강화 및 가입 초기 집중 케어 서비스 안내"
         elif churn > 20:
-            persona = "MEDIUM RISK — Mid-term Wavering Customers"
-            action  = "Priority: Retention offer, annual plan conversion promotion"
+            persona = "중위험군 (Medium Risk) — 혜택에 민감한 중기 이탈 예상 고객"
+            action  = "우선 과제: 연납 전환 시 보험료 할인 프로모션 및 리텐션 오퍼 제공"
         else:
-            persona = "LOW RISK — Loyal Long-term Customers"
-            action  = "Priority: Upsell add-on coverage, VIP loyalty program"
+            persona = "저위험군 (Low Risk) — 장기 유지 중인 충성 고객"
+            action  = "유지 과제: VIP 로열티 프로그램 제공 및 맞춤형 특약 상품 업셀링"
 
-        print(f"\n  Cluster {cluster_id}: {persona}")
-        print(f"    Churn Rate : {churn:.1f}%")
-        print(f"    Avg Tenure : {tenure:.1f} months")
-        print(f"    Avg Premium: ${charge:.1f}/month")
-        print(f"    Size       : {count:,} customers")
-        print(f"    Action     : {action}")
+        print(f"\n  군집 {cluster_id}: {persona}")
+        print(f"    이탈률   : {churn:.1f}%")
+        print(f"    평균 기간: {tenure:.1f}개월")
+        print(f"    평균 납입: 월 {charge:.1f}달러")
+        print(f"    고객 수  : {count:,}명")
+        print(f"    기획 방향: {action}")
 
 
 # =============================================================================
-# Main
+# 실행
 # =============================================================================
 
 if __name__ == '__main__':
     print("=" * 60)
-    print("  Insurance Digital Platform - Customer Churn Analysis")
-    print("  STEP 3: Customer Segmentation (K-means Clustering)")
+    print("  보험 디지털 플랫폼 고객 이탈 분석")
+    print("  STEP 3: 고객 세분화 (K-Means Clustering)")
     print("=" * 60)
 
-    # Load data
     df = load_data(DATA_PATH)
 
-    # 1. Prepare features
-    print("\n[1] Preparing features...")
+    print("\n[1] 군집화 변수 전처리 중...")
     X_scaled, feature_names, scaler = prepare_features(df)
-    print(f"  Feature matrix: {X_scaled.shape[0]} customers × {X_scaled.shape[1]} features")
+    print(f"  변환 완료: {X_scaled.shape[0]}명 고객 × {X_scaled.shape[1]}개 특성 변수")
 
-    # 2. Find optimal K
-    print("\n[2] Finding optimal K...")
+    print("\n[2] 최적의 군집 수(K) 탐색 중...")
     best_k, inertias, silhouettes = find_optimal_k(X_scaled)
 
-    # 3. Fit final model
-    print(f"\n[3] Fitting K-means with K={best_k}...")
+    print(f"\n[3] 도출된 최적값(K={best_k})으로 K-Means 모델 학습 중...")
     km, labels = fit_kmeans(X_scaled, best_k)
 
-    # 4. Visualize clusters (PCA)
-    print("\n[4] Visualizing clusters via PCA...")
+    print("\n[4] 군집화 결과 시각화 (PCA 축소)...")
     plot_clusters_pca(X_scaled, labels, best_k)
 
-    # 5. Profile clusters
-    print("\n[5] Profiling clusters...")
+    print("\n[5] 군집별 특성 프로파일링 분석...")
     df_clustered, numeric_profile = profile_clusters(df, labels, best_k)
 
-    # 6. Assign personas
+    # 6. 페르소나 부여
     assign_personas(numeric_profile)
 
-    # Save clustered data for next step
+    # 다음 단계(로지스틱 회귀 모델링)를 위해 군집 정보가 추가된 데이터 저장
     out_path = os.path.join(BASE_DIR, 'data', 'telco_clustered.csv')
     df_clustered.to_csv(out_path, index=False)
-    print(f"\n  Clustered data saved: {out_path}")
+    print(f"\n  군집화 데이터 저장 완료: {out_path}")
 
     print("\n" + "=" * 60)
-    print("✅ 03_clustering.py complete")
-    print("   -> Next: python src/04_modeling.py")
+    print("✅ 03_clustering.py 실행 완료")
+    print("   → 다음 단계: python src/04_modeling.py")
     print("=" * 60)

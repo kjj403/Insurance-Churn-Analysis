@@ -3,32 +3,31 @@
 # 데이터 로드 및 기본 확인
 #
 # [분석 배경]
-# 삼성화재 디지털 서비스 기획/운영 직무는 고객의 서비스 이용 데이터를
+# 디지털 서비스 기획/운영 직무는 고객의 서비스 이용 데이터를
 # 모니터링하고 이를 바탕으로 신규 서비스를 기획하는 업무를 수행한다.
 # 실제 보험사 앱 고객 행동 데이터는 공개되어 있지 않으므로,
 # 구조적으로 동일한 통신사 구독 고객 데이터(IBM Telco Churn)를 활용한다.
 #
 # [도메인 매핑]
 #   통신사 월정액 구독  →  보험료 월납
-#   서비스 해지(Churn)  →  보험 해약
+#   서비스 해지         →  보험 해약
 #   고객센터 문의       →  민원/챗봇 이용
 #   부가서비스 이용     →  특약/부가 보장 가입
 #
 # [데이터 출처]
 #   IBM Telco Customer Churn Dataset
-#   https://www.kaggle.com/datasets/blastchar/telco-customer-churn
 #   - 7,043명의 통신사 가입자 정보 + 이탈 여부
 #   - 21개 변수 (인구통계, 계약 정보, 서비스 이용, 납입 정보)
 # =============================================================================
 
 import os
+import sys
 import pandas as pd
 import numpy as np
 
-# 데이터 경로 설정 (이 파일 기준으로 상대경로)
+# 데이터 경로 설정 (이 파일 기준으로 상위 폴더의 data 디렉토리 접근)
 BASE_DIR  = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_PATH = os.path.join(BASE_DIR, 'data', 'Telco-Customer-Churn.csv')
-
 
 # =============================================================================
 # STEP 1. 데이터 로드 및 전처리
@@ -44,24 +43,27 @@ def load_data() -> pd.DataFrame:
     2. 공백으로 인한 결측치 행 제거 (11건, 전체의 0.16% — 분석에 영향 미미)
     3. Churn_binary: 타겟 변수 이진화 (Yes=1 이탈/해약, No=0 유지)
     """
-    # CSV 직접 로드
-    df = pd.read_csv(DATA_PATH)
+    # 파일 존재 여부 사전 체크
+    if not os.path.exists(DATA_PATH):
+        print(f"❌ 오류: 데이터 파일을 찾을 수 없습니다. 경로를 확인해주세요.\n  경로: {DATA_PATH}")
+        sys.exit(1)
+
+    # CSV 로드 (인코딩 명시)
+    df = pd.read_csv(DATA_PATH, encoding='utf-8')
     print(f"✅ 데이터 로드 완료: {DATA_PATH}")
 
     # TotalCharges: 공백 문자열 → NaN → float
-    # errors='coerce'는 변환 불가 값을 NaN으로 처리하는 옵션
     df['TotalCharges'] = pd.to_numeric(df['TotalCharges'], errors='coerce')
 
-    # 결측치 제거 (신규 가입 직후 해약 케이스 — 이탈 패턴 분석 대상 아님)
+    # 결측치 제거 
     before = len(df)
     df = df.dropna(subset=['TotalCharges']).reset_index(drop=True)
     print(f"  결측치 제거: {before - len(df)}행 제거 → 최종 {len(df):,}행")
 
-    # 타겟 변수 이진화 (보험 도메인: 1=해약, 0=유지)
+    # 타겟 변수 이진화 (1=해약, 0=유지)
     df['Churn_binary'] = (df['Churn'] == 'Yes').astype(int)
 
     return df
-
 
 # =============================================================================
 # STEP 2. 데이터 요약 출력
@@ -78,13 +80,13 @@ def summarize(df: pd.DataFrame):
     print(f"  수치형 변수  : {df.select_dtypes(include='number').shape[1]}개")
     print(f"  범주형 변수  : {df.select_dtypes(include='object').shape[1]}개")
 
-    print(f"\n{sep}\n[ 전체 변수 목록 및 타입 ]\n{sep}")
-    print(df.dtypes.to_string())
-
     print(f"\n{sep}\n[ 결측치 현황 ]\n{sep}")
     missing = df.isnull().sum()
     missing = missing[missing > 0]
-    print("  ✅ 결측치 없음" if len(missing) == 0 else missing)
+    if len(missing) == 0:
+        print("  ✅ 결측치 없음")
+    else:
+        print(missing.to_string())
 
     print(f"\n{sep}\n[ 타겟 변수(Churn) 분포 — 보험 도메인 해석 ]\n{sep}")
     counts = df['Churn'].value_counts()
@@ -110,7 +112,6 @@ def summarize(df: pd.DataFrame):
     }
     for col, desc in mapping.items():
         print(f"  {col:<22} {desc}")
-
 
 # =============================================================================
 # 실행
