@@ -1,0 +1,7 @@
+venv/
+data/*.csv
+__pycache__/
+*.pyc
+models/*.pkl
+.DS_Store
+venv/
